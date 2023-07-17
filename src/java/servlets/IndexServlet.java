@@ -8,7 +8,10 @@ import bean.ContaBean;
 import bean.TransacaoBean;
 import com.google.gson.Gson;
 import enumerator.TipoMensagem;
+import incriptacao.RSAEncryption;
+import incriptacao.RSAKeyUtils;
 import java.io.IOException;
+import java.security.PrivateKey;
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
 import javax.jms.Destination;
@@ -30,6 +33,8 @@ import org.apache.activemq.command.ActiveMQQueue;
 import util.TransacaoServer;
 import java.sql.Timestamp;
 import java.util.Date;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  *
@@ -60,7 +65,7 @@ public class IndexServlet extends HttpServlet {
             Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
 
             MessageConsumer consumer = session.createConsumer(filaValidador);
-            
+
             consumer.setMessageListener(new MessageListener() {
                 @Override
                 public void onMessage(Message message) {
@@ -75,7 +80,7 @@ public class IndexServlet extends HttpServlet {
                             TransacaoServer transacaoServer = gson.fromJson(mensagem, TransacaoServer.class);
 //
 //                            // Realizar validação da transação
-                            TransacaoServer  TransacaoServerResposta =  validarTransacao(transacaoServer);
+                            TransacaoServer TransacaoServerResposta = validarTransacao(transacaoServer);
 
                             // Enviar a resposta para a fila de retorno especificada pelo cliente
                             connectionFactory = new ActiveMQConnectionFactory("tcp://localhost:61616");
@@ -113,29 +118,48 @@ public class IndexServlet extends HttpServlet {
     }
 
     private TransacaoServer validarTransacao(TransacaoServer transacaoServer) {
-        
-        TransacaoBean transacaoBean = new TransacaoBean();
-        //Criar instancia de ContaBean
+        //Recuperação da conta de origem
         ContaBean contaBean = new ContaBean();
-        
-        // Criar a instacia da TransacaoBean
-        TransacaoModel transacaoModel = new TransacaoModel();
-        //Recuperação das contas
         contaBean.findById(transacaoServer.getPkContaOrigem().intValue());
         ContaModel contaOrigem = contaBean.getModel();
-        contaBean.findByNumeroConta(transacaoServer.getNumeroContaDestino());
-        ContaModel contaDestino = contaBean.getModel();
-        //Passagem de conta para transacao
-        transacaoModel.setContaOrigem(contaOrigem);
-        transacaoModel.setContaDestino(contaDestino);
-        transacaoModel.setValor(transacaoServer.getValor());
-        transacaoModel.setDataTransacao(transacaoServer.getDataTransacao());
-        transacaoModel.setDataValidacao(new Timestamp(new Date().getTime()));
-        
-        transacaoBean.setModel(transacaoModel);
-        //
-        TipoMensagem tipoMensagem = transacaoBean.saveOrUpdate();
-        transacaoServer.setTipoMensagem(tipoMensagem);
+
+        try {
+            //Recuperação da chave privada
+            PrivateKey privateKey = RSAKeyUtils.privateKeyFromBytes(contaOrigem.getChavePrivada());
+
+            int numeroContaDestino = (int) RSAEncryption.decrypt(transacaoServer.getNumeroContaDestino(), privateKey);
+            double valor = (double) RSAEncryption.decrypt(transacaoServer.getValor(), privateKey);
+            Timestamp dataTransacao = (Timestamp) RSAEncryption.decrypt(transacaoServer.getDataTransacao(), privateKey);
+
+            TransacaoBean transacaoBean = new TransacaoBean();
+            //Criar instancia de ContaBean
+
+            // Criar a instacia da TransacaoBean
+            TransacaoModel transacaoModel = new TransacaoModel();
+
+            contaBean.findByNumeroConta(numeroContaDestino);
+            ContaModel contaDestino = contaBean.getModel();
+            //Passagem de conta para transacao
+            transacaoModel.setContaOrigem(contaOrigem);
+            transacaoModel.setContaDestino(contaDestino);
+            transacaoModel.setValor(valor);
+            transacaoModel.setDataTransacao(dataTransacao);
+            transacaoModel.setDataValidacao(new Timestamp(new Date().getTime()));
+
+            transacaoBean.setModel(transacaoModel);
+            //
+            TipoMensagem tipoMensagem = transacaoBean.saveOrUpdate();
+            System.out.println("Servidor recebeu:::"+ tipoMensagem.getDescricao());
+            transacaoServer.setTipoMensagem(RSAEncryption.encrypt(tipoMensagem, RSAKeyUtils.publicKeyFromBytes(contaOrigem.getChavePublica())));
+        } catch (Exception ex) {
+            System.err.println(ex);
+            try {
+                transacaoServer.setTipoMensagem(RSAEncryption.encrypt(TipoMensagem.ERRO, RSAKeyUtils.publicKeyFromBytes(contaOrigem.getChavePublica())));
+            } catch (Exception ex1) {
+                Logger.getLogger(IndexServlet.class.getName()).log(Level.SEVERE, null, ex1);
+            }
+
+        }
         return transacaoServer;
     }
 
